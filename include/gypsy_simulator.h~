@@ -1,0 +1,19 @@
+/*
+ * gypsy_simulator.h
+ *
+ *  Created on: Sep 28, 2013
+ *      Author: daniel
+ */
+
+#ifndef GYPSY_SIMULATOR_H_
+#define GYPSY_SIMULATOR_H_
+
+// Constants
+#define PI 3.14159
+
+// Functions
+void motor_callback(const sabertooth_driver::motor_cmd& cmd_msg);
+void mixed_callback(const sabertooth_driver::mixed_cmd& cmd_msg);
+geometry_msgs::Pose2D update_location(const geometry_msgs::Pose2D current_position, float left_delta, float right_delta);
+
+#endif /* GYPSY_SIMULATOR_H_ */
