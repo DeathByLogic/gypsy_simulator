@@ -5,18 +5,21 @@
  *      Author: daniel
  */
 
+// C Includes
 #include <cmath>
 #include <unistd.h>
 
+// ROS Includes
 #include <ros/ros.h>
-#include <geometry_msgs/Pose2D.h>
-#include <geometry_msgs/Twist.h>
-#include <geometry_msgs/Vector3.h>
-#include <tf/transform_broadcaster.h>
-#include <nav_msgs/Odometry.h>
 #include <std_msgs/Float64.h>
-#include <std_msgs/Float32.h>
+#include <nav_msgs/Odometry.h>
+#include <geometry_msgs/Twist.h>
+#include <geometry_msgs/Pose2D.h>
+#include <geometry_msgs/Vector3.h>
+#include <sensor_msgs/JointState.h>
+#include <tf/transform_broadcaster.h>
 
+// Application Includes
 #include "gypsy_simulator.h"
 
 // Macros
@@ -24,26 +27,24 @@
 
 // Global variables
 float wheel_base;
+float wheel_diam;
 float max_speed;
-float max_turn;
 
 int motor_cmd_max;
 int publish_rate;
 
-float drive_cmd;
-float turn_cmd;
-
-// Left and right wheel speed
-std_msgs::Float32 left_speed;
-std_msgs::Float32 right_speed;
+float drive_cmd, turn_cmd;
+float left_speed, right_speed;
+float left_pos, right_pos;
 
 int main (int argc, char** argv) {
 	// Store current and previous time
 	ros::Time current_time, last_time;
 
-	// Current position and velocity
+	// Messages
 	geometry_msgs::Pose2D current_pos;
 	geometry_msgs::Pose2D current_vel;
+	sensor_msgs::JointState joint_state;
 
 	// Topics
 	std::string drive_topic, turn_topic;
@@ -56,21 +57,21 @@ int main (int argc, char** argv) {
 
 	// Get parameters
 	if (!n.getParam("gypsy_simulator/wheel_base", wheel_base)) {
-		ROS_ERROR("Sabertooth: Failed to get param wheel_base");
+		ROS_ERROR("Gypsy Simulator: Failed to get param wheel_base");
+
+		// Quit on error
+		exit(EINVAL);
+	}
+
+	if (!n.getParam("gypsy_simulator/wheel_diameter", wheel_diam)) {
+		ROS_ERROR("Gypsy Simulator: Failed to get param wheel_diameter");
 
 		// Quit on error
 		exit(EINVAL);
 	}
 
 	if (!n.getParam("gypsy_simulator/max_speed", max_speed)) {
-		ROS_ERROR("Sabertooth: Failed to get param max_speed");
-
-		// Quit on error
-		exit(EINVAL);
-	}
-
-	if (!n.getParam("gypsy_simulator/max_turn", max_turn)) {
-		ROS_ERROR("Sabertooth: Failed to get param max_turn");
+		ROS_ERROR("Gypsy Simulator: Failed to get param max_speed");
 
 		// Quit on error
 		exit(EINVAL);
@@ -87,10 +88,17 @@ int main (int argc, char** argv) {
 	ros::Subscriber turn_sub = n.subscribe(turn_topic, 50, turn_callback);
 
 	// Create publication handlers
-	ros::Publisher left_speed_pub = n.advertise<std_msgs::Float32>("left_wheel_speed", 10);
-	ros::Publisher right_speed_pub = n.advertise<std_msgs::Float32>("right_wheel_speed", 10);
+	ros::Publisher joint_pub = n.advertise<sensor_msgs::JointState>("joint_states", 1);
 	ros::Publisher odom_pub = n.advertise<nav_msgs::Odometry>("odom", 50);
 	tf::TransformBroadcaster odom_broadcaster;
+
+	// Resize and name the joint states
+	joint_state.name.resize(2);
+	joint_state.position.resize(2);
+	joint_state.velocity.resize(2);
+
+	joint_state.name[0] ="left_wheel_joint";
+	joint_state.name[1] ="right_wheel_joint";
 
 	// Get and save current time
 	current_time = ros::Time::now();
@@ -106,12 +114,13 @@ int main (int argc, char** argv) {
 		double dtt = (current_time - last_time).toSec();
 
 		// Calculate velocites
-		current_vel.x = (right_speed.data + left_speed.data) / 2;
+		current_vel.x = (right_speed + left_speed) / 2;
 		current_vel.y = 0.0;
-		current_vel.theta = (right_speed.data - left_speed.data) / wheel_base;
+		current_vel.theta = (right_speed - left_speed) / wheel_base;
 
 		// Calculate position
-		current_pos = update_location(current_pos, right_speed.data * dtt, left_speed.data * dtt);
+		//current_pos = update_location(current_pos, dtt);
+		current_pos = update_location(current_pos, left_speed * dtt, right_speed * dtt);
 
 		// Create a quaternion created from yaw
 		geometry_msgs::Quaternion odom_quat = tf::createQuaternionMsgFromYaw(current_pos.theta);
@@ -150,9 +159,17 @@ int main (int argc, char** argv) {
 		// Publish the message
 		odom_pub.publish(odom);
 
-		// Publish current left and right velocity
-		left_speed_pub.publish(left_speed);
-		right_speed_pub.publish(right_speed);
+		// Update the Joint State
+		joint_state.header.stamp = current_time;
+
+		joint_state.position[0] += (left_speed * dtt) / (wheel_diam / 2.0);
+		joint_state.velocity[0] = left_speed;
+
+		joint_state.position[1] += (right_speed * dtt) / (wheel_diam / 2.0);
+		joint_state.velocity[1] = right_speed;
+
+		// Publish the joint state
+		joint_pub.publish(joint_state);
 
 		// Update time
 		last_time = current_time;
@@ -176,43 +193,37 @@ void turn_callback(const std_msgs::Float64& cmd_msg) {
 	update_speed(drive_cmd, turn_cmd);
 }
 
-void update_speed(float drive, float turn) {
-	float left_command = constrain(drive - turn / 2.0, -motor_cmd_max, motor_cmd_max);
-	float right_command = constrain(drive + turn / 2.0, -motor_cmd_max, motor_cmd_max);
+void update_speed(float drive_command, float turn_command) {
+	float left_command = constrain(drive_command - turn_command / 2.0, -motor_cmd_max, motor_cmd_max);
+	float right_command = constrain(drive_command + turn_command / 2.0, -motor_cmd_max, motor_cmd_max);
 
-	left_speed.data = left_command / (float)motor_cmd_max * max_speed;
-	right_speed.data = right_command / (float)motor_cmd_max * max_speed;
+	left_speed = left_command / (float)motor_cmd_max * max_speed;
+	right_speed = right_command / (float)motor_cmd_max * max_speed;
 }
 
 // Update the calculated position with new data
 geometry_msgs::Pose2D update_location(const geometry_msgs::Pose2D current_position, float left_delta, float right_delta) {
-	geometry_msgs::Pose2D new_position = current_position;
+	geometry_msgs::Pose2D new_position;
 
 	float theta_l;
 	float theta_r;
-	float theta_sum;
 
 	// Caclulate new theta
 	theta_l = -left_delta / wheel_base;
 	theta_r = right_delta / wheel_base;
-
-	new_position.theta += theta_l + theta_r;
 	
+	// Keep Theta within -PI to PI
+	new_position.theta = fmod(current_position.theta + theta_r + theta_l + PI, 2 * PI) - PI;
+
 	// Calculate new position
+	new_position.x = current_position.x;
+	new_position.y = current_position.y;
+
 	new_position.x += 0.5 * wheel_base * (sin(current_position.theta) - sin(current_position.theta + theta_l));
 	new_position.y += 0.5 * wheel_base * (cos(current_position.theta + theta_l) - cos(current_position.theta));
 	
 	new_position.x += 0.5 * wheel_base * (sin(current_position.theta + theta_r) - sin(current_position.theta));
 	new_position.y += 0.5 * wheel_base * (cos(current_position.theta) - cos(current_position.theta + theta_r));
-
-	// Keep theta within +- PI
-	if (new_position.theta > PI) {
-		new_position.theta -= 2 * PI;
-	}
-
-	if (new_position.theta < -PI) {
-		new_position.theta += 2 * PI;
-	}
 
 	return new_position;
 }
